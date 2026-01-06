@@ -60,6 +60,7 @@ def process_file(uploaded_file, md_engine):
     original_size_bytes = uploaded_file.size
     
     # Create temp file
+    tmp_file_path = None
     try:
         suffix = file_ext.lower()
         with tempfile.NamedTemporaryFile(delete=False, suffix=suffix) as tmp_file:
@@ -70,7 +71,7 @@ def process_file(uploaded_file, md_engine):
         conversion_success = False
         error_details = ""
 
-        # --- Attempt 1: MarkItDown ---
+        # --- Attempt 1: MarkItDown (Primary Engine) ---
         try:
             result = md_engine.convert(tmp_file_path)
             text_content = result.text_content
@@ -78,7 +79,7 @@ def process_file(uploaded_file, md_engine):
         except Exception as e:
             error_details += f"MarkItDown failed: {str(e)}\n"
             
-            # --- Attempt 2: PDF Fallback ---
+            # --- Attempt 2: PDF Fallback (pdfplumber) ---
             if suffix == '.pdf':
                 try:
                     with pdfplumber.open(tmp_file_path) as pdf:
@@ -150,4 +151,25 @@ def process_file(uploaded_file, md_engine):
                 if savings > 0:
                     st.markdown(f"### 📉 Text version is **{savings:.1f}% smaller**.")
                 else:
-                    st.markdown(f"### 📈 Text version is **{abs(savings):.1f}% larger** (likely due to OCR or
+                    st.markdown(f"### 📈 Text version is **{abs(savings):.1f}% larger**.")
+
+        # --- Failure Path ---
+        else:
+            st.error(f"⚠️ Could not read {original_filename}. Please check the format.")
+            with st.expander("See Error Details"):
+                st.code(error_details)
+
+    except Exception as e:
+        st.error(f"⚠️ System Error processing {original_filename}.")
+        print(f"Critical Error: {e}")
+    
+    finally:
+        # Cleanup temp file
+        if tmp_file_path and os.path.exists(tmp_file_path):
+            try:
+                os.remove(tmp_file_path)
+            except Exception:
+                pass
+
+if __name__ == "__main__":
+    main()
