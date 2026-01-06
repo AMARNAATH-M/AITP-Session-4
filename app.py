@@ -1,6 +1,7 @@
 import streamlit as st
 import os
 import tempfile
+import pdfplumber
 from markitdown import MarkItDown
 
 # --- Page Configuration ---
@@ -20,11 +21,20 @@ st.markdown("""
     </style>
 """, unsafe_allow_html=True)
 
+def format_file_size(size_in_bytes):
+    """Helper to convert bytes to KB or MB"""
+    if size_in_bytes < 1024:
+        return f"{size_in_bytes} bytes"
+    elif size_in_bytes < 1024 * 1024:
+        return f"{size_in_bytes / 1024:.2f} KB"
+    else:
+        return f"{size_in_bytes / (1024 * 1024):.2f} MB"
+
 def main():
     st.title("📄 Universal Document Reader")
     st.markdown("Upload your documents (Word, Excel, PPT, PDF, HTML) to convert them into clean Markdown text.")
 
-    # --- [2] The Interface: Upload Area ---
+    # --- Upload Area ---
     uploaded_files = st.file_uploader(
         "Drag and drop files here", 
         accept_multiple_files=True,
@@ -35,85 +45,109 @@ def main():
         st.divider()
         st.subheader("Processed Documents")
 
-        # Initialize the Engine
-        # Note: MarkItDown handles format detection automatically based on file extension
         md = MarkItDown()
 
         for uploaded_file in uploaded_files:
-            # Create a container for each file to keep UI organized
             with st.container():
                 process_file(uploaded_file, md)
                 st.divider()
 
 def process_file(uploaded_file, md_engine):
-    """
-    Handles the logic of saving the upload temporarily, 
-    converting it, and cleaning up.
-    """
-    # Get the original filename and extension
     original_filename = uploaded_file.name
-    filename_no_ext, _ = os.path.splitext(original_filename)
+    filename_no_ext, file_ext = os.path.splitext(original_filename)
     
-    # We need a temporary file because MarkItDown expects a file path, 
-    # not a memory stream.
+    # Calculate Original Size
+    original_size_bytes = uploaded_file.size
+    
+    # Create temp file
     try:
-        # Create a temp file with the correct suffix so MarkItDown knows how to treat it
-        suffix = os.path.splitext(original_filename)[1]
+        suffix = file_ext.lower()
         with tempfile.NamedTemporaryFile(delete=False, suffix=suffix) as tmp_file:
             tmp_file.write(uploaded_file.getvalue())
             tmp_file_path = tmp_file.name
 
-        # --- [1] The Engine: Conversion ---
-        # We perform the conversion
-        result = md_engine.convert(tmp_file_path)
-        
-        # Extract content
-        text_content = result.text_content
-        
-        # --- [2] The Interface: Instant Preview ---
-        st.success(f"✅ Successfully converted: **{original_filename}**")
-        
-        # Display text in a scrollable box
-        st.text_area(
-            label=f"Preview: {original_filename}",
-            value=text_content,
-            height=300
-        )
+        text_content = ""
+        conversion_success = False
+        error_details = ""
 
-        # --- [2] The Interface: Download Options ---
-        col1, col2 = st.columns(2)
-        
-        # Option 1: Download as Markdown (.md)
-        new_filename_md = f"{filename_no_ext}_converted.md"
-        with col1:
-            st.download_button(
-                label="⬇️ Download Markdown",
-                data=text_content,
-                file_name=new_filename_md,
-                mime="text/markdown"
-            )
+        # --- Attempt 1: MarkItDown ---
+        try:
+            result = md_engine.convert(tmp_file_path)
+            text_content = result.text_content
+            conversion_success = True
+        except Exception as e:
+            error_details += f"MarkItDown failed: {str(e)}\n"
+            
+            # --- Attempt 2: PDF Fallback ---
+            if suffix == '.pdf':
+                try:
+                    with pdfplumber.open(tmp_file_path) as pdf:
+                        text_content = "\n\n".join([page.extract_text() or "" for page in pdf.pages])
+                    if text_content.strip():
+                        conversion_success = True
+                        original_filename += " (processed with Fallback Engine)"
+                    else:
+                        error_details += "Fallback failed: PDF appears empty.\n"
+                except Exception as fallback_e:
+                    error_details += f"Fallback failed: {str(fallback_e)}\n"
 
-        # Option 2: Download as Text (.txt)
-        new_filename_txt = f"{filename_no_ext}_converted.txt"
-        with col2:
-            st.download_button(
-                label="⬇️ Download Text File",
-                data=text_content,
-                file_name=new_filename_txt,
-                mime="text/plain"
-            )
+        # --- Success Path ---
+        if conversion_success:
+            st.success(f"✅ Successfully converted: **{original_filename}**")
+            
+            # Create Tabs for View Options
+            tab1, tab2 = st.tabs(["📄 Preview & Download", "📊 File Size Comparison"])
+            
+            # --- TAB 1: Preview & Download ---
+            with tab1:
+                st.text_area(
+                    label=f"Preview content",
+                    value=text_content,
+                    height=300,
+                    label_visibility="collapsed"
+                )
 
-    except Exception as e:
-        # --- [3] Resilience: Error Handling ---
-        # Catching all exceptions to prevent app crash
-        st.error(f"⚠️ Could not read {original_filename}. Please check the format.")
-        # Optional: Print the actual error to console for developer debugging
-        print(f"Error processing {original_filename}: {e}")
+                col1, col2 = st.columns(2)
+                new_filename_md = f"{filename_no_ext}_converted.md"
+                with col1:
+                    st.download_button(
+                        label="⬇️ Download Markdown",
+                        data=text_content,
+                        file_name=new_filename_md,
+                        mime="text/markdown"
+                    )
 
-    finally:
-        # Cleanup: Remove the temporary file to keep the server clean
-        if 'tmp_file_path' in locals() and os.path.exists(tmp_file_path):
-            os.remove(tmp_file_path)
+                new_filename_txt = f"{filename_no_ext}_converted.txt"
+                with col2:
+                    st.download_button(
+                        label="⬇️ Download Text File",
+                        data=text_content,
+                        file_name=new_filename_txt,
+                        mime="text/plain"
+                    )
 
-if __name__ == "__main__":
-    main()
+            # --- TAB 2: File Size Comparison ---
+            with tab2:
+                # Calculate Converted Size (approximate bytes of the text string)
+                converted_size_bytes = len(text_content.encode('utf-8'))
+                
+                # Calculate Savings
+                if original_size_bytes > 0:
+                    savings = (original_size_bytes - converted_size_bytes) / original_size_bytes * 100
+                else:
+                    savings = 0
+                
+                # Create Clean Table Data
+                data = [
+                    {"Metric": "Original File Size", "Value": format_file_size(original_size_bytes)},
+                    {"Metric": "Converted Text Size", "Value": format_file_size(converted_size_bytes)}
+                ]
+                
+                # Display Table
+                st.table(data)
+                
+                # Display Highlighted Percentage
+                if savings > 0:
+                    st.markdown(f"### 📉 Text version is **{savings:.1f}% smaller**.")
+                else:
+                    st.markdown(f"### 📈 Text version is **{abs(savings):.1f}% larger** (likely due to OCR or
